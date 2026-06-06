@@ -5,19 +5,21 @@ This setup runs n8n with PostgreSQL, persistent Docker volumes, local file stora
 ## Quick start
 
 ```bash
-docker compose up -d
-```
-
-If `.env` does not exist, Compose starts a one-shot `init-env` service that creates it from `.env.example` with generated secrets, then stops before PostgreSQL or n8n start. Because Docker Compose reads `.env` before it starts services, review the generated `.env` and run this once more so the n8n and PostgreSQL containers use those generated values:
-
-```bash
-docker compose up -d
-```
-
-For the cleanest first production start, you can generate `.env` before starting containers:
-
-```bash
 chmod +x scripts/*.sh
+scripts/start.sh
+```
+
+`scripts/start.sh` creates `.env` when missing, runs host preflight checks, detects common stale-volume secret mismatches, and then starts the stack.
+
+If you run raw Docker Compose and `.env` does not exist, Compose starts a one-shot `init-env` service that creates it from `.env.example` with generated secrets, then stops before PostgreSQL or n8n start. Because Docker Compose reads `.env` before it starts services, review the generated `.env` and run Compose once more so the n8n and PostgreSQL containers use those generated values:
+
+```bash
+docker compose up -d
+```
+
+For the cleanest first production start, use the scripts:
+
+```bash
 scripts/bootstrap.sh
 scripts/start.sh
 ```
@@ -37,6 +39,8 @@ Start n8n:
 scripts/start.sh
 docker compose logs -f n8n
 ```
+
+If `.env` is regenerated while old Docker volumes still exist, n8n can fail with an encryption-key mismatch or PostgreSQL can reject the new password. `scripts/start.sh` checks for these cases and prints the exact volume reset command for fresh installs. For existing installs, restore the old `N8N_ENCRYPTION_KEY` or `POSTGRES_PASSWORD` instead of deleting volumes.
 
 By default n8n binds to `127.0.0.1:3001`, which is suitable when using a reverse proxy for HTTPS. Change `N8N_BIND_ADDRESS=0.0.0.0` only if you intentionally want to expose the port directly.
 
