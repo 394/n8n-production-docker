@@ -29,6 +29,18 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    cpus: ${POSTGRES_CPUS:-1.0}
+    mem_limit: ${POSTGRES_MEMORY:-768m}
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}
+      - -c
+      - work_mem=${POSTGRES_WORK_MEM:-16MB}
+      - -c
+      - maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-128MB}
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-100}
     depends_on:
       init-env:
         condition: service_completed_successfully
@@ -43,12 +55,20 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    logging:
+      driver: json-file
+      options:
+        max-size: "${LOG_MAX_SIZE:-10m}"
+        max-file: "${LOG_MAX_FILES:-3}"
     networks:
       - n8n_internal
 
   n8n:
     image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG:-stable}
     restart: unless-stopped
+    cpus: ${N8N_CPUS:-1.0}
+    mem_limit: ${N8N_MEMORY:-1024m}
+    stop_grace_period: 60s
     depends_on:
       postgres:
         condition: service_healthy
@@ -91,12 +111,20 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "${LOG_MAX_SIZE:-10m}"
+        max-file: "${LOG_MAX_FILES:-3}"
     networks:
       - n8n_internal
 
   task-runners:
     image: docker.n8n.io/n8nio/runners:${N8N_IMAGE_TAG:-stable}
     restart: unless-stopped
+    cpus: ${N8N_RUNNERS_CPUS:-1.0}
+    mem_limit: ${N8N_RUNNERS_MEMORY:-1024m}
+    stop_grace_period: 60s
     depends_on:
       n8n:
         condition: service_healthy
@@ -106,6 +134,11 @@ services:
       N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT: ${N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT:-15}
       GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-Asia/Yangon}
       TZ: ${TZ:-Asia/Yangon}
+    logging:
+      driver: json-file
+      options:
+        max-size: "${LOG_MAX_SIZE:-10m}"
+        max-file: "${LOG_MAX_FILES:-3}"
     networks:
       - n8n_internal
 

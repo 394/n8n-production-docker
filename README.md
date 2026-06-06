@@ -19,7 +19,7 @@ For the cleanest first production start, you can generate `.env` before starting
 ```bash
 chmod +x scripts/*.sh
 scripts/bootstrap.sh
-docker compose up -d
+scripts/start.sh
 ```
 
 Edit `.env` before production use:
@@ -34,11 +34,46 @@ Edit `.env` before production use:
 Start n8n:
 
 ```bash
-docker compose up -d
+scripts/start.sh
 docker compose logs -f n8n
 ```
 
 By default n8n binds to `127.0.0.1:3001`, which is suitable when using a reverse proxy for HTTPS. Change `N8N_BIND_ADDRESS=0.0.0.0` only if you intentionally want to expose the port directly.
+
+## Host sizing and stability
+
+This setup includes host preflight checks and container resource caps so a small VPS fails early instead of degrading unpredictably under load.
+
+Default minimum host checks:
+
+- `MIN_CPU_CORES=2`
+- `MIN_MEMORY_MB=2048`
+- `MIN_FREE_DISK_MB=10240`
+- `MIN_BACKUP_FREE_DISK_MB=20480`
+
+Default container caps:
+
+- PostgreSQL: `POSTGRES_CPUS=1.0`, `POSTGRES_MEMORY=768m`
+- n8n: `N8N_CPUS=1.0`, `N8N_MEMORY=1024m`
+- Task runners: `N8N_RUNNERS_CPUS=1.0`, `N8N_RUNNERS_MEMORY=1024m`
+
+For a 2 CPU / 2 GB RAM server, keep workflow concurrency low and avoid large binary payload processing. For heavier workflows, file processing, AI calls, or many concurrent executions, increase RAM first and then raise `N8N_MEMORY` and `N8N_RUNNERS_MEMORY`.
+
+Run preflight checks manually:
+
+```bash
+scripts/preflight.sh
+scripts/preflight.sh --backup
+```
+
+PostgreSQL memory knobs are exposed in `.env`:
+
+- `POSTGRES_SHARED_BUFFERS`
+- `POSTGRES_WORK_MEM`
+- `POSTGRES_MAINTENANCE_WORK_MEM`
+- `POSTGRES_MAX_CONNECTIONS`
+
+Docker JSON logs are capped with `LOG_MAX_SIZE` and `LOG_MAX_FILES` to avoid log growth filling the disk.
 
 ## Automatic updates
 
@@ -63,6 +98,8 @@ scripts/install-auto-update-cron.sh
 ```
 
 Update logs are written to `backups/update.log`. If the post-update health check fails, the script exits non-zero and leaves the containers/logs available for inspection.
+
+The update and backup scripts run preflight checks before they start. Updates require the backup disk threshold because a backup is created before containers are recreated.
 
 ## Backups
 

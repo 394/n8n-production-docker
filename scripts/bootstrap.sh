@@ -37,4 +37,5 @@ else
 fi
 
 docker compose config >/dev/null
+"${ROOT_DIR}/scripts/preflight.sh"
 echo "Bootstrap complete. Start with: docker compose up -d"

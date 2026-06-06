@@ -14,6 +14,8 @@ set -a
 source .env
 set +a
 
+"${ROOT_DIR}/scripts/preflight.sh" --backup
+
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 backup_dir="${ROOT_DIR}/backups/${timestamp}"
 project_name="${COMPOSE_PROJECT_NAME:-n8n}"

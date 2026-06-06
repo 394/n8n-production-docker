@@ -14,6 +14,8 @@ set -a
 source .env
 set +a
 
+"${ROOT_DIR}/scripts/preflight.sh" --backup
+
 force_update=false
 if [[ "${1:-}" == "--force" ]]; then
   force_update=true
