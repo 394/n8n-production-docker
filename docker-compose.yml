@@ -1,0 +1,120 @@
+services:
+  init-env:
+    image: alpine:3.20
+    restart: "no"
+    working_dir: /workspace
+    command:
+      - sh
+      - -ec
+      - |
+        mkdir -p backups local-files
+        if [ ! -f .env ]; then
+          umask 077
+          postgres_password="$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 48)"
+          encryption_key="$(tr -dc 'A-Fa-f0-9' < /dev/urandom | head -c 64)"
+          runners_auth_token="$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 48)"
+          sed \
+            -e "s|POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$${postgres_password}|" \
+            -e "s|N8N_ENCRYPTION_KEY=.*|N8N_ENCRYPTION_KEY=$${encryption_key}|" \
+            -e "s|N8N_RUNNERS_AUTH_TOKEN=.*|N8N_RUNNERS_AUTH_TOKEN=$${runners_auth_token}|" \
+            .env.example > .env
+          echo "Created .env. Review domain values, then run docker compose up -d again so Compose reads it."
+          exit 1
+        else
+          echo ".env already exists."
+        fi
+    volumes:
+      - .:/workspace
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    depends_on:
+      init-env:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-n8n}
+      POSTGRES_USER: ${POSTGRES_USER:-n8n}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-generate-a-long-password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - n8n_internal
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG:-stable}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${N8N_BIND_ADDRESS:-127.0.0.1}:${N8N_PORT:-3001}:5678"
+    environment:
+      NODE_ENV: production
+      N8N_HOST: ${N8N_HOST:-n8n.example.com}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: ${N8N_PROTOCOL:-https}
+      WEBHOOK_URL: ${WEBHOOK_URL:-https://n8n.example.com/}
+      N8N_EDITOR_BASE_URL: ${N8N_EDITOR_BASE_URL:-https://n8n.example.com/}
+      N8N_PROXY_HOPS: ${N8N_PROXY_HOPS:-1}
+      N8N_SECURE_COOKIE: ${N8N_SECURE_COOKIE:-true}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-change-me-generate-a-32-plus-character-key}
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      N8N_RUNNERS_ENABLED: "true"
+      N8N_RUNNERS_MODE: external
+      N8N_RUNNERS_BROKER_LISTEN_ADDRESS: 0.0.0.0
+      N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN:-change-me-generate-a-long-runner-token}
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-Asia/Yangon}
+      TZ: ${TZ:-Asia/Yangon}
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB:-n8n}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER:-n8n}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:-change-me-generate-a-long-password}
+      DB_POSTGRESDB_SCHEMA: public
+      EXECUTIONS_DATA_PRUNE: ${EXECUTIONS_DATA_PRUNE:-true}
+      EXECUTIONS_DATA_MAX_AGE: ${EXECUTIONS_DATA_MAX_AGE:-336}
+      N8N_DIAGNOSTICS_ENABLED: ${N8N_DIAGNOSTICS_ENABLED:-false}
+      N8N_VERSION_NOTIFICATIONS_ENABLED: ${N8N_VERSION_NOTIFICATIONS_ENABLED:-true}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./local-files:/files
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:5678/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - n8n_internal
+
+  task-runners:
+    image: docker.n8n.io/n8nio/runners:${N8N_IMAGE_TAG:-stable}
+    restart: unless-stopped
+    depends_on:
+      n8n:
+        condition: service_healthy
+    environment:
+      N8N_RUNNERS_TASK_BROKER_URI: http://n8n:5679
+      N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN:-change-me-generate-a-long-runner-token}
+      N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT: ${N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT:-15}
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-Asia/Yangon}
+      TZ: ${TZ:-Asia/Yangon}
+    networks:
+      - n8n_internal
+
+networks:
+  n8n_internal:
+    driver: bridge
+
+volumes:
+  n8n_data:
+    name: ${COMPOSE_PROJECT_NAME:-n8n}_n8n_data
+  postgres_data:
+    name: ${COMPOSE_PROJECT_NAME:-n8n}_postgres_data
