@@ -19,6 +19,40 @@ set +a
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 backup_dir="${ROOT_DIR}/backups/${timestamp}"
 project_name="${COMPOSE_PROJECT_NAME:-n8n}"
+backup_retention_days="${BACKUP_RETENTION_DAYS:-14}"
+
+cleanup_old_backups() {
+  if [[ "${backup_retention_days}" == "0" ]]; then
+    echo "Backup retention cleanup disabled."
+    return
+  fi
+
+  if ! [[ "${backup_retention_days}" =~ ^[0-9]+$ ]]; then
+    echo "BACKUP_RETENTION_DAYS must be a non-negative integer." >&2
+    exit 1
+  fi
+
+  echo "Removing local backups older than ${backup_retention_days} days..."
+  find "${ROOT_DIR}/backups" -mindepth 1 -maxdepth 1 -type d \
+    -name '????????T??????Z' -mtime +"${backup_retention_days}" -exec rm -rf {} +
+}
+
+upload_offsite_backup() {
+  if [[ -z "${RCLONE_REMOTE:-}" ]]; then
+    echo "Offsite backup upload skipped. Set RCLONE_REMOTE to enable it."
+    return
+  fi
+
+  if ! command -v rclone >/dev/null 2>&1; then
+    echo "RCLONE_REMOTE is set but rclone is not installed." >&2
+    exit 1
+  fi
+
+  echo "Uploading backup to ${RCLONE_REMOTE}..."
+  rclone copy "${backup_dir}" "${RCLONE_REMOTE%/}/${timestamp}" \
+    --transfers="${RCLONE_TRANSFERS:-4}" \
+    --checkers="${RCLONE_CHECKERS:-8}"
+}
 
 mkdir -p "${backup_dir}"
 chmod 700 "${backup_dir}"
@@ -45,3 +79,5 @@ tar -czf "${backup_dir}/local_files.tar.gz" -C "${ROOT_DIR}" local-files
 cp .env "${backup_dir}/env.snapshot"
 chmod 600 "${backup_dir}/env.snapshot"
 echo "Backup written to ${backup_dir}"
+upload_offsite_backup
+cleanup_old_backups

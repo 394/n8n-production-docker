@@ -37,12 +37,20 @@ docker volume rm "${project_name}_n8n_data" "${project_name}_postgres_data" >/de
 docker compose up -d postgres
 
 echo "Waiting for PostgreSQL..."
+postgres_ready=false
 for _ in {1..30}; do
   if docker compose exec -T postgres pg_isready -U "${POSTGRES_USER:-n8n}" -d "${POSTGRES_DB:-n8n}" >/dev/null 2>&1; then
+    postgres_ready=true
     break
   fi
   sleep 2
 done
+
+if [[ "${postgres_ready}" != "true" ]]; then
+  echo "PostgreSQL did not become ready; aborting restore before pg_restore." >&2
+  docker compose logs --tail=80 postgres >&2 || true
+  exit 1
+fi
 
 docker compose cp "${backup_dir}/postgres.dump" postgres:/tmp/postgres.dump
 docker compose exec -T postgres pg_restore \

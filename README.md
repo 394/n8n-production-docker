@@ -75,6 +75,8 @@ PostgreSQL memory knobs are exposed in `.env`:
 
 Docker JSON logs are capped with `LOG_MAX_SIZE` and `LOG_MAX_FILES` to avoid log growth filling the disk.
 
+Runtime containers set `no-new-privileges` to reduce container breakout blast radius. n8n and task runners also drop Linux capabilities and get a bounded `/tmp` tmpfs for temporary writes. PostgreSQL keeps its default capabilities because the official image may need startup permissions while initializing or fixing ownership on the data volume. If you want to go stricter, test a Compose override with `read_only: true` for n8n and task runners after confirming all nodes you use can write only to `/tmp`, `/home/node/.n8n`, and `/files`.
+
 ## Automatic updates
 
 The update script pulls the configured n8n and task-runner images, compares them with the running containers, creates a backup, recreates the n8n and task-runner containers, and waits for n8n to become healthy.
@@ -141,6 +143,13 @@ Rollback uses Docker tags created from the exact image IDs running before the up
 N8N_UPDATE_AUTO_ROLLBACK=false
 ```
 
+Old rollback image tags are cleaned after successful updates. Tune or disable this with:
+
+```bash
+N8N_ROLLBACK_IMAGE_RETENTION_DAYS=14
+N8N_ROLLBACK_IMAGE_RETENTION_DAYS=0
+```
+
 If rollback itself fails, restore from the backup created immediately before the update. This can happen when an updated n8n image ran a database migration that is not compatible with the previous image:
 
 ```bash
@@ -166,6 +175,22 @@ Backups are stored under `backups/YYYYMMDDTHHMMSSZ/` and include:
 
 Backup directories are created with owner-only permissions because `env.snapshot` contains secrets. Store encrypted backup copies outside this server as part of your production operations.
 
+Local backup retention defaults to 14 days:
+
+```bash
+BACKUP_RETENTION_DAYS=14
+```
+
+Set it to `0` to disable retention cleanup.
+
+For offsite backups, configure an encrypted `rclone` remote, such as an `rclone crypt` remote backed by S3, Backblaze B2, or another storage provider, then set:
+
+```bash
+RCLONE_REMOTE=n8n-crypt:n8n-production
+```
+
+When `RCLONE_REMOTE` is set, `scripts/backup.sh` uploads each completed backup directory after the local archive files are written.
+
 ## Restore
 
 Test restore before enabling unattended updates. Restore replaces `.env`, the PostgreSQL volume, the n8n data volume, and `local-files` from the selected backup:
@@ -176,6 +201,8 @@ scripts/restore.sh backups/YYYYMMDDTHHMMSSZ
 
 The restore script requires typing `RESTORE` before it stops containers or replaces data.
 
+The restore script also waits for PostgreSQL and aborts before `pg_restore` if the database does not become ready.
+
 ## Reverse proxy
 
 Terminate HTTPS in a reverse proxy and forward traffic to:
@@ -185,6 +212,37 @@ http://127.0.0.1:3001
 ```
 
 Make sure your proxy sends standard forwarded headers such as `X-Forwarded-Proto`, `X-Forwarded-Host`, and `X-Forwarded-For`.
+
+Example reverse proxy configs are provided:
+
+- `examples/Caddyfile` for a simple HTTPS Caddy deployment.
+- `examples/nginx-n8n.conf` for Nginx with HTTPS redirect, forwarded headers, websocket support, upload limits, and request rate limiting.
+
+Copy the example for your proxy, replace `n8n.example.com`, and point it at `http://127.0.0.1:3001`.
+
+## Monitoring
+
+Run the monitoring check manually:
+
+```bash
+scripts/monitor.sh
+```
+
+It exits non-zero when n8n `/healthz` fails, free disk is below `MONITOR_MIN_FREE_DISK_MB`, the newest backup is older than `MONITOR_BACKUP_MAX_AGE_HOURS`, `backups/update.log` is stale or contains recent failure indicators, or any container has restarted.
+
+For external monitoring, run it from cron and alert on non-zero exit, or call it from a local agent used by Uptime Kuma, Cronitor, healthchecks.io, or your host monitoring stack.
+
+Useful thresholds:
+
+```bash
+MONITOR_MIN_FREE_DISK_MB=10240
+MONITOR_BACKUP_MAX_AGE_HOURS=26
+MONITOR_UPDATE_LOG_MAX_AGE_HOURS=26
+```
+
+## CI
+
+GitHub Actions validates shell syntax, runs ShellCheck, and checks Docker Compose rendering on pushes and pull requests to `main`.
 
 ## Notes
 

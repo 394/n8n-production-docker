@@ -153,6 +153,44 @@ scan_recent_logs() {
   fi
 }
 
+cleanup_old_rollback_images() {
+  local retention_days="${N8N_ROLLBACK_IMAGE_RETENTION_DAYS:-14}"
+  local cutoff image tag timestamp formatted_timestamp image_epoch
+
+  if [[ "${retention_days}" == "0" ]]; then
+    echo "Rollback image cleanup disabled."
+    return
+  fi
+
+  if ! [[ "${retention_days}" =~ ^[0-9]+$ ]]; then
+    echo "N8N_ROLLBACK_IMAGE_RETENTION_DAYS must be a non-negative integer." >&2
+    return 1
+  fi
+
+  cutoff="$(date -u -d "${retention_days} days ago" +%s 2>/dev/null || true)"
+  if [[ -z "${cutoff}" ]]; then
+    echo "Rollback image cleanup skipped: date does not support GNU -d syntax." >&2
+    return 0
+  fi
+
+  while read -r image; do
+    [[ -n "${image}" ]] || continue
+    tag="${image##*:}"
+    timestamp="${tag#rollback-}"
+    formatted_timestamp="${timestamp:0:4}-${timestamp:4:2}-${timestamp:6:2} ${timestamp:9:2}:${timestamp:11:2}:${timestamp:13:2} UTC"
+    image_epoch="$(date -u -d "${formatted_timestamp}" +%s 2>/dev/null || true)"
+    if [[ -n "${image_epoch}" && "${image_epoch}" -lt "${cutoff}" ]]; then
+      echo "Removing old rollback image tag ${image}..."
+      docker image rm "${image}" >/dev/null 2>&1 || true
+    fi
+  done < <(
+    {
+      docker images "docker.n8n.io/n8nio/n8n" --format '{{.Repository}}:{{.Tag}}'
+      docker images "docker.n8n.io/n8nio/runners" --format '{{.Repository}}:{{.Tag}}'
+    } | grep ':rollback-[0-9]\{8\}T[0-9]\{6\}Z$' || true
+  )
+}
+
 prepare_rollback_images() {
   echo "Tagging currently running images for rollback..."
   docker tag "${running_n8n_image_id}" "docker.n8n.io/n8nio/n8n:${rollback_tag}"
@@ -273,4 +311,5 @@ if ! scan_recent_logs; then
 fi
 
 docker image prune -f --filter "label=org.opencontainers.image.title=n8n" >/dev/null || true
+cleanup_old_rollback_images
 echo "n8n update complete."

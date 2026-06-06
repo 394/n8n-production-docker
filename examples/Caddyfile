@@ -1,0 +1,12 @@
+# Replace n8n.example.com with your public n8n domain.
+n8n.example.com {
+	encode zstd gzip
+
+	reverse_proxy 127.0.0.1:3001 {
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {host}
+	}
+}
