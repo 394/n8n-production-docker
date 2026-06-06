@@ -117,7 +117,7 @@ Install a daily cron job:
 scripts/install-auto-update-cron.sh
 ```
 
-Update logs are written to `backups/update.log`. If the post-update health check fails or recent logs contain crash/error indicators, the script exits non-zero and leaves the containers/logs available for inspection.
+Update logs are written to `backups/update.log`. If the post-update health check fails or recent logs contain crash/error indicators, the script rolls back to the pre-update images by default, exits non-zero, and leaves logs available for inspection.
 
 The update and backup scripts run preflight checks before they start. Updates require the backup disk threshold because a backup is created before containers are recreated.
 
@@ -129,11 +129,23 @@ The update script will not restart n8n when:
 - Host CPU, RAM, or disk preflight checks fail.
 - `N8N_AUTO_UPDATE=false` and you did not pass `--force` or `--security`.
 
-The update script will stop with an error after install when:
+The update script will automatically roll back to the pre-update n8n and task-runner images when:
 
 - n8n does not become healthy again.
 - The task-runner container does not stay running.
 - Recent n8n or task-runner logs include common crash indicators such as fatal errors, failed migrations, database errors, out-of-memory errors, or permission/authentication failures.
+
+Rollback uses Docker tags created from the exact image IDs running before the update. Disable it only when you intentionally want to inspect the failed updated containers:
+
+```bash
+N8N_UPDATE_AUTO_ROLLBACK=false
+```
+
+If rollback itself fails, restore from the backup created immediately before the update. This can happen when an updated n8n image ran a database migration that is not compatible with the previous image:
+
+```bash
+scripts/restore.sh backups/YYYYMMDDTHHMMSSZ
+```
 
 These checks reduce update risk, but they do not replace testing restore and checking n8n release notes before planned upgrades.
 

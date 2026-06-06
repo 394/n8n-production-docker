@@ -17,6 +17,8 @@ set +a
 force_update=false
 check_only=false
 security_update=false
+rollback_tag="rollback-$(date -u +%Y%m%dT%H%M%SZ)"
+rollback_started=false
 
 for arg in "$@"; do
   case "${arg}" in
@@ -78,7 +80,7 @@ container_status() {
 }
 
 wait_for_n8n() {
-  local attempts=30
+  local attempts="${1:-30}"
   local i
   for ((i = 1; i <= attempts; i++)); do
     if docker compose exec -T n8n node -e "fetch('http://127.0.0.1:5678/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" >/dev/null 2>&1; then
@@ -151,6 +153,53 @@ scan_recent_logs() {
   fi
 }
 
+prepare_rollback_images() {
+  echo "Tagging currently running images for rollback..."
+  docker tag "${running_n8n_image_id}" "docker.n8n.io/n8nio/n8n:${rollback_tag}"
+  if [[ -n "${running_runner_image_id}" ]]; then
+    docker tag "${running_runner_image_id}" "docker.n8n.io/n8nio/runners:${rollback_tag}"
+  else
+    echo "Task runner was not running before update; rollback will only restore n8n image." >&2
+  fi
+}
+
+rollback_to_previous_images() {
+  local reason="$1"
+
+  if [[ "${N8N_UPDATE_AUTO_ROLLBACK:-true}" != "true" ]]; then
+    echo "Update failed: ${reason}. Auto rollback is disabled; inspect containers and restore manually if needed." >&2
+    return 1
+  fi
+
+  if [[ "${rollback_started}" == "true" ]]; then
+    echo "Rollback already attempted. Reason: ${reason}" >&2
+    return 1
+  fi
+  rollback_started=true
+
+  echo "Update failed: ${reason}" >&2
+  echo "Rolling back to pre-update images tagged ${rollback_tag}..." >&2
+
+  if [[ -n "${running_runner_image_id}" ]]; then
+    N8N_IMAGE_TAG="${rollback_tag}" docker compose up -d n8n task-runners
+  else
+    N8N_IMAGE_TAG="${rollback_tag}" docker compose up -d n8n
+  fi
+
+  if ! wait_for_n8n "${N8N_ROLLBACK_HEALTH_ATTEMPTS:-30}"; then
+    echo "Rollback failed: n8n did not become healthy. A database migration may have run; restore from the backup created before update." >&2
+    return 1
+  fi
+
+  if [[ -n "${running_runner_image_id}" ]] && ! wait_for_running task-runners; then
+    echo "Rollback warning: task runner did not stay running. Inspect logs before resuming workflows." >&2
+    return 1
+  fi
+
+  echo "Rollback complete. n8n is running the pre-update image again." >&2
+  return 0
+}
+
 n8n_container_id="$(require_container n8n)"
 runner_container_id="$(docker compose ps -q task-runners || true)"
 
@@ -203,21 +252,23 @@ fi
 
 echo "New image found. Creating backup before update..."
 "${ROOT_DIR}/scripts/backup.sh"
+prepare_rollback_images
 
 echo "Starting updated n8n and task runner containers..."
 docker compose up -d n8n task-runners
 
 if ! wait_for_n8n; then
-  echo "n8n did not become healthy after update. Check logs before continuing." >&2
+  rollback_to_previous_images "n8n did not become healthy after update"
   exit 1
 fi
 
 if ! wait_for_running task-runners; then
-  echo "Task runner container did not stay running after update. Check logs before continuing." >&2
+  rollback_to_previous_images "task runner container did not stay running after update"
   exit 1
 fi
 
 if ! scan_recent_logs; then
+  rollback_to_previous_images "recent logs contain crash/error indicators after update"
   exit 1
 fi
 
