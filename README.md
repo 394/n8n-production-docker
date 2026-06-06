@@ -79,16 +79,36 @@ Docker JSON logs are capped with `LOG_MAX_SIZE` and `LOG_MAX_FILES` to avoid log
 
 The update script pulls the configured n8n and task-runner images, compares them with the running containers, creates a backup, recreates the n8n and task-runner containers, and waits for n8n to become healthy.
 
+Check for an available update without restarting n8n:
+
+```bash
+scripts/update-n8n.sh --check
+```
+
 Unattended updates are disabled by default. Enable them only after you have tested restore on this host:
 
 ```bash
 N8N_AUTO_UPDATE=true
 ```
 
-Run one update check manually:
+Install one update manually:
 
 ```bash
 scripts/update-n8n.sh --force
+```
+
+Use the urgent security path only after reviewing an n8n advisory for a high/critical issue such as RCE or sandbox escape:
+
+```bash
+scripts/update-n8n.sh --security
+```
+
+The security path allows an update even if the current n8n health check is failing. It still runs preflight checks, creates a backup, waits for post-update health, and scans recent logs for crash indicators.
+
+Check n8n security advisories manually:
+
+```bash
+scripts/security-check.sh
 ```
 
 Install a daily cron job:
@@ -97,9 +117,25 @@ Install a daily cron job:
 scripts/install-auto-update-cron.sh
 ```
 
-Update logs are written to `backups/update.log`. If the post-update health check fails, the script exits non-zero and leaves the containers/logs available for inspection.
+Update logs are written to `backups/update.log`. If the post-update health check fails or recent logs contain crash/error indicators, the script exits non-zero and leaves the containers/logs available for inspection.
 
 The update and backup scripts run preflight checks before they start. Updates require the backup disk threshold because a backup is created before containers are recreated.
+
+The update script will not restart n8n when:
+
+- You run `scripts/update-n8n.sh --check`.
+- No newer image is available.
+- n8n is unhealthy before a normal update.
+- Host CPU, RAM, or disk preflight checks fail.
+- `N8N_AUTO_UPDATE=false` and you did not pass `--force` or `--security`.
+
+The update script will stop with an error after install when:
+
+- n8n does not become healthy again.
+- The task-runner container does not stay running.
+- Recent n8n or task-runner logs include common crash indicators such as fatal errors, failed migrations, database errors, out-of-memory errors, or permission/authentication failures.
+
+These checks reduce update risk, but they do not replace testing restore and checking n8n release notes before planned upgrades.
 
 ## Backups
 
