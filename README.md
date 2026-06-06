@@ -29,7 +29,7 @@ Edit `.env` before production use:
 - The default timezone is `Asia/Yangon`; change `GENERIC_TIMEZONE` and `TZ` only if needed.
 - Keep `N8N_ENCRYPTION_KEY` unchanged after first start.
 - Keep `N8N_RUNNERS_AUTH_TOKEN` secret. It is used by the external task-runner sidecar.
-- For stricter release control, set `N8N_IMAGE_TAG` to a tested n8n version instead of `stable`. The n8n and task-runner images must use the same version tag.
+- Keep `N8N_IMAGE_TAG` pinned to a tested n8n version. External task runners do not publish a `stable` tag, and the n8n and task-runner images must use the same version tag.
 
 Start n8n:
 
@@ -246,7 +246,7 @@ GitHub Actions validates shell syntax, runs ShellCheck, and checks Docker Compos
 
 ## Notes
 
-- This defaults to the official n8n `stable` Docker tag, which n8n documents as the production tag. Pin `N8N_IMAGE_TAG` for more controlled production releases.
+- This setup pins `N8N_IMAGE_TAG` because external task runners require a matching versioned `n8nio/runners` image; `n8nio/runners:stable` is not published.
 - External task runners use the same `N8N_IMAGE_TAG` as n8n, as required by n8n's task-runner guidance.
 - PostgreSQL data is stored in the `${COMPOSE_PROJECT_NAME}_postgres_data` Docker volume.
 - n8n application data is stored in the `${COMPOSE_PROJECT_NAME}_n8n_data` Docker volume.
