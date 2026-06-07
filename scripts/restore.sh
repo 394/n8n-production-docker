@@ -33,7 +33,7 @@ set -a
 source .env
 set +a
 
-docker volume rm "${project_name}_n8n_data" "${project_name}_postgres_data" >/dev/null 2>&1 || true
+docker volume rm "${project_name}_n8n_data" "${project_name}_postgres_data" "${project_name}_redis_data" >/dev/null 2>&1 || true
 docker compose up -d postgres
 
 echo "Waiting for PostgreSQL..."

@@ -19,6 +19,9 @@ check_only=false
 security_update=false
 rollback_tag="rollback-$(date -u +%Y%m%dT%H%M%SZ)"
 rollback_started=false
+n8n_services=(n8n n8n-worker-1 n8n-worker-2)
+runner_services=(task-runner-worker-1 task-runner-worker-2)
+update_services=("${n8n_services[@]}" "${runner_services[@]}")
 
 for arg in "$@"; do
   case "${arg}" in
@@ -36,7 +39,7 @@ for arg in "$@"; do
       cat <<'USAGE'
 Usage:
   scripts/update-n8n.sh --check       Pull images and report whether an update exists. Does not restart n8n.
-  scripts/update-n8n.sh --force       Backup, update, and health-check n8n.
+  scripts/update-n8n.sh --force       Backup, update, and health-check n8n queue-mode services.
   scripts/update-n8n.sh --security    Urgent security update path for known RCE/high-critical advisories.
 
 Unattended cron updates require N8N_AUTO_UPDATE=true.
@@ -79,20 +82,22 @@ container_status() {
   echo "${status:-unknown}"
 }
 
-wait_for_n8n() {
-  local attempts="${1:-30}"
+check_health() {
+  local service="$1"
+  docker compose exec -T "${service}" node -e "fetch('http://127.0.0.1:5678/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" >/dev/null 2>&1
+}
+
+wait_for_health() {
+  local service="$1"
+  local attempts="${2:-30}"
   local i
   for ((i = 1; i <= attempts; i++)); do
-    if docker compose exec -T n8n node -e "fetch('http://127.0.0.1:5678/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" >/dev/null 2>&1; then
+    if check_health "${service}"; then
       return 0
     fi
     sleep 5
   done
   return 1
-}
-
-check_n8n_health() {
-  docker compose exec -T n8n node -e "fetch('http://127.0.0.1:5678/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" >/dev/null 2>&1
 }
 
 wait_for_running() {
@@ -147,8 +152,8 @@ scan_recent_logs() {
     return 0
   fi
 
-  if docker compose logs --since 3m n8n task-runners 2>/dev/null | grep -Eiq 'fatal|panic|uncaught|migration.*failed|database.*error|out of memory|heap out of memory|permission denied|auth.*failed|connection refused'; then
-    echo "Recent logs contain crash/error indicators. Inspect with: docker compose logs --since 10m n8n task-runners" >&2
+  if docker compose logs --since 3m "${update_services[@]}" 2>/dev/null | grep -Eiq 'fatal|panic|uncaught|migration.*failed|database.*error|out of memory|heap out of memory|permission denied|auth.*failed|connection refused'; then
+    echo "Recent logs contain crash/error indicators. Inspect with: docker compose logs --since 10m ${update_services[*]}" >&2
     return 1
   fi
 }
@@ -186,7 +191,7 @@ cleanup_old_rollback_images() {
   done < <(
     {
       docker images "docker.n8n.io/n8nio/n8n" --format '{{.Repository}}:{{.Tag}}'
-      docker images "docker.n8n.io/n8nio/runners" --format '{{.Repository}}:{{.Tag}}'
+      docker images "n8nio/runners" --format '{{.Repository}}:{{.Tag}}'
     } | grep ':rollback-[0-9]\{8\}T[0-9]\{6\}Z$' || true
   )
 }
@@ -194,11 +199,7 @@ cleanup_old_rollback_images() {
 prepare_rollback_images() {
   echo "Tagging currently running images for rollback..."
   docker tag "${running_n8n_image_id}" "docker.n8n.io/n8nio/n8n:${rollback_tag}"
-  if [[ -n "${running_runner_image_id}" ]]; then
-    docker tag "${running_runner_image_id}" "docker.n8n.io/n8nio/runners:${rollback_tag}"
-  else
-    echo "Task runner was not running before update; rollback will only restore n8n image." >&2
-  fi
+  docker tag "${running_runner_image_id}" "n8nio/runners:${rollback_tag}"
 }
 
 rollback_to_previous_images() {
@@ -218,65 +219,67 @@ rollback_to_previous_images() {
   echo "Update failed: ${reason}" >&2
   echo "Rolling back to pre-update images tagged ${rollback_tag}..." >&2
 
-  if [[ -n "${running_runner_image_id}" ]]; then
-    N8N_IMAGE_TAG="${rollback_tag}" docker compose up -d n8n task-runners
-  else
-    N8N_IMAGE_TAG="${rollback_tag}" docker compose up -d n8n
-  fi
+  N8N_IMAGE_TAG="${rollback_tag}" docker compose up -d "${update_services[@]}"
 
-  if ! wait_for_n8n "${N8N_ROLLBACK_HEALTH_ATTEMPTS:-30}"; then
-    echo "Rollback failed: n8n did not become healthy. A database migration may have run; restore from the backup created before update." >&2
-    return 1
-  fi
+  for service in "${n8n_services[@]}"; do
+    if ! wait_for_health "${service}" "${N8N_ROLLBACK_HEALTH_ATTEMPTS:-30}"; then
+      echo "Rollback failed: ${service} did not become healthy. Restore from the backup created before update." >&2
+      return 1
+    fi
+  done
 
-  if [[ -n "${running_runner_image_id}" ]] && ! wait_for_running task-runners; then
-    echo "Rollback warning: task runner did not stay running. Inspect logs before resuming workflows." >&2
-    return 1
-  fi
+  for service in "${runner_services[@]}"; do
+    if ! wait_for_running "${service}"; then
+      echo "Rollback warning: ${service} did not stay running. Inspect logs before resuming workflows." >&2
+      return 1
+    fi
+  done
 
-  echo "Rollback complete. n8n is running the pre-update image again." >&2
+  echo "Rollback complete. Queue-mode services are running the pre-update images again." >&2
   return 0
 }
 
-n8n_container_id="$(require_container n8n)"
-runner_container_id="$(docker compose ps -q task-runners || true)"
+for service in "${n8n_services[@]}" "${runner_services[@]}"; do
+  require_container "${service}" >/dev/null
+done
 
-pre_update_status="$(container_status n8n)"
-if [[ "${pre_update_status}" != "running" ]]; then
-  echo "n8n is not running before update; status=${pre_update_status}. Aborting." >&2
-  exit 1
-fi
-
-if ! check_n8n_health; then
-  if [[ "${security_update}" == "true" || "${N8N_SECURITY_UPDATE_OVERRIDE:-false}" == "true" ]]; then
-    echo "n8n health check failed before update, but security override is enabled. Continuing with backup and update." >&2
-  else
-    echo "n8n is unhealthy before update. Fix the current instance first, or use --security for an urgent security patch." >&2
+for service in "${n8n_services[@]}"; do
+  pre_update_status="$(container_status "${service}")"
+  if [[ "${pre_update_status}" != "running" ]]; then
+    echo "${service} is not running before update; status=${pre_update_status}. Aborting." >&2
     exit 1
   fi
-fi
 
+  if ! check_health "${service}"; then
+    if [[ "${security_update}" == "true" || "${N8N_SECURITY_UPDATE_OVERRIDE:-false}" == "true" ]]; then
+      echo "${service} health check failed before update, but security override is enabled. Continuing with backup and update." >&2
+    else
+      echo "${service} is unhealthy before update. Fix the current instance first, or use --security for an urgent security patch." >&2
+      exit 1
+    fi
+  fi
+done
+
+n8n_container_id="$(docker compose ps -q n8n)"
+runner_container_id="$(docker compose ps -q task-runner-worker-1)"
 running_n8n_image_id="$(docker inspect --format '{{.Image}}' "${n8n_container_id}")"
-running_runner_image_id=""
-if [[ -n "${runner_container_id}" ]]; then
-  running_runner_image_id="$(docker inspect --format '{{.Image}}' "${runner_container_id}")"
-fi
+running_runner_image_id="$(docker inspect --format '{{.Image}}' "${runner_container_id}")"
 
 check_security_advisories
 
 echo "Checking for newer n8n and task runner images..."
-docker compose pull n8n task-runners
+docker compose pull "${update_services[@]}"
 
 target_image_id="$(docker compose images -q n8n)"
-target_runner_image_id="$(docker compose images -q task-runners)"
+target_runner_image_id="$(docker compose images -q task-runner-worker-1)"
 if [[ "${running_n8n_image_id}" == "${target_image_id}" && "${running_runner_image_id}" == "${target_runner_image_id}" ]]; then
-  echo "n8n and task runners are already running the latest pulled images."
+  echo "Queue-mode n8n services are already running the latest pulled images."
   exit 0
 fi
 
 echo "Update available:"
 echo "  n8n image: ${running_n8n_image_id} -> ${target_image_id}"
-echo "  runner image: ${running_runner_image_id:-not-running} -> ${target_runner_image_id}"
+echo "  runner image: ${running_runner_image_id} -> ${target_runner_image_id}"
 
 if [[ "${check_only}" == "true" ]]; then
   echo "Check complete. No containers were restarted. Install with: scripts/update-n8n.sh --force"
@@ -292,18 +295,22 @@ echo "New image found. Creating backup before update..."
 "${ROOT_DIR}/scripts/backup.sh"
 prepare_rollback_images
 
-echo "Starting updated n8n and task runner containers..."
-docker compose up -d n8n task-runners
+echo "Starting updated queue-mode services..."
+docker compose up -d "${update_services[@]}"
 
-if ! wait_for_n8n; then
-  rollback_to_previous_images "n8n did not become healthy after update"
-  exit 1
-fi
+for service in "${n8n_services[@]}"; do
+  if ! wait_for_health "${service}"; then
+    rollback_to_previous_images "${service} did not become healthy after update"
+    exit 1
+  fi
+done
 
-if ! wait_for_running task-runners; then
-  rollback_to_previous_images "task runner container did not stay running after update"
-  exit 1
-fi
+for service in "${runner_services[@]}"; do
+  if ! wait_for_running "${service}"; then
+    rollback_to_previous_images "${service} did not stay running after update"
+    exit 1
+  fi
+done
 
 if ! scan_recent_logs; then
   rollback_to_previous_images "recent logs contain crash/error indicators after update"
@@ -312,4 +319,4 @@ fi
 
 docker image prune -f --filter "label=org.opencontainers.image.title=n8n" >/dev/null || true
 cleanup_old_rollback_images
-echo "n8n update complete."
+echo "n8n queue-mode update complete."

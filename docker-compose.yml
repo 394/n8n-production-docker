@@ -13,12 +13,9 @@ services:
           postgres_password="$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 48)"
           encryption_key="$(tr -dc 'A-Fa-f0-9' < /dev/urandom | head -c 64)"
           runners_auth_token="$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 48)"
-          sed \
-            -e "s|POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$${postgres_password}|" \
-            -e "s|N8N_ENCRYPTION_KEY=.*|N8N_ENCRYPTION_KEY=$${encryption_key}|" \
-            -e "s|N8N_RUNNERS_AUTH_TOKEN=.*|N8N_RUNNERS_AUTH_TOKEN=$${runners_auth_token}|" \
-            .env.example > .env
-          echo "Created .env. Review domain values, then run docker compose up -d again so Compose reads it."
+          redis_password="$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 48)"
+          sed             -e "s|POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$${postgres_password}|"             -e "s|N8N_ENCRYPTION_KEY=.*|N8N_ENCRYPTION_KEY=$${encryption_key}|"             -e "s|N8N_RUNNERS_AUTH_TOKEN=.*|N8N_RUNNERS_AUTH_TOKEN=$${runners_auth_token}|"             -e "s|REDIS_PASSWORD=.*|REDIS_PASSWORD=$${redis_password}|"             .env.example > .env
+          echo "Created .env. Review domain values, then run scripts/start.sh."
           exit 1
         else
           echo ".env already exists."
@@ -31,18 +28,18 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
-    cpus: ${POSTGRES_CPUS:-1.0}
-    mem_limit: ${POSTGRES_MEMORY:-768m}
+    cpus: ${POSTGRES_CPUS:-1.5}
+    mem_limit: ${POSTGRES_MEMORY:-8g}
     command:
       - postgres
       - -c
-      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-2GB}
       - -c
-      - work_mem=${POSTGRES_WORK_MEM:-16MB}
+      - work_mem=${POSTGRES_WORK_MEM:-32MB}
       - -c
-      - maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-128MB}
+      - maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-512MB}
       - -c
-      - max_connections=${POSTGRES_MAX_CONNECTIONS:-100}
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-200}
     depends_on:
       init-env:
         condition: service_completed_successfully
@@ -65,6 +62,37 @@ services:
     networks:
       - n8n_internal
 
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cpus: ${REDIS_CPUS:-0.5}
+    mem_limit: ${REDIS_MEMORY:-2g}
+    command:
+      - sh
+      - -ec
+      - redis-server --appendonly yes --requirepass "$${REDIS_PASSWORD}"
+    depends_on:
+      init-env:
+        condition: service_completed_successfully
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-change-me-generate-a-long-redis-password}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", 'redis-cli -a "$$REDIS_PASSWORD" ping | grep -q PONG']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging:
+      driver: json-file
+      options:
+        max-size: "${LOG_MAX_SIZE:-10m}"
+        max-file: "${LOG_MAX_FILES:-3}"
+    networks:
+      - n8n_internal
+
   n8n:
     image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG:-1.121.0}
     restart: unless-stopped
@@ -72,11 +100,13 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    cpus: ${N8N_CPUS:-1.0}
-    mem_limit: ${N8N_MEMORY:-1024m}
+    cpus: ${N8N_MAIN_CPUS:-1.5}
+    mem_limit: ${N8N_MAIN_MEMORY:-4g}
     stop_grace_period: 60s
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     ports:
       - "${N8N_BIND_ADDRESS:-127.0.0.1}:${N8N_PORT:-3001}:5678"
@@ -89,6 +119,71 @@ services:
       N8N_EDITOR_BASE_URL: ${N8N_EDITOR_BASE_URL:-https://n8n.example.com/}
       N8N_PROXY_HOPS: ${N8N_PROXY_HOPS:-1}
       N8N_SECURE_COOKIE: ${N8N_SECURE_COOKIE:-true}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-change-me-generate-a-32-plus-character-key}
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-Asia/Yangon}
+      TZ: ${TZ:-Asia/Yangon}
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB:-n8n}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER:-n8n}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:-change-me-generate-a-long-password}
+      DB_POSTGRESDB_SCHEMA: public
+      EXECUTIONS_MODE: queue
+      N8N_DEFAULT_BINARY_DATA_MODE: ${N8N_DEFAULT_BINARY_DATA_MODE:-database}
+      N8N_EVENTBUS_LOGWRITER_LOGFULLPATH: /home/node/.n8n/n8nEventLog-main.log
+      N8N_EVENTBUS_LOGWRITER_MAXTOTALMESSAGESPERFILE: ${N8N_EVENTBUS_LOGWRITER_MAXTOTALMESSAGESPERFILE:-500000}
+      OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS: ${OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS:-true}
+      N8N_CONCURRENCY_PRODUCTION_LIMIT: ${N8N_CONCURRENCY_PRODUCTION_LIMIT:-20}
+      QUEUE_BULL_REDIS_HOST: redis
+      QUEUE_BULL_REDIS_PORT: 6379
+      QUEUE_BULL_REDIS_PASSWORD: ${REDIS_PASSWORD:-change-me-generate-a-long-redis-password}
+      QUEUE_BULL_REDIS_DB: ${QUEUE_BULL_REDIS_DB:-0}
+      QUEUE_BULL_REDIS_TIMEOUT_THRESHOLD: ${QUEUE_BULL_REDIS_TIMEOUT_THRESHOLD:-10000}
+      EXECUTIONS_DATA_PRUNE: ${EXECUTIONS_DATA_PRUNE:-true}
+      EXECUTIONS_DATA_MAX_AGE: ${EXECUTIONS_DATA_MAX_AGE:-336}
+      N8N_DIAGNOSTICS_ENABLED: ${N8N_DIAGNOSTICS_ENABLED:-false}
+      N8N_VERSION_NOTIFICATIONS_ENABLED: ${N8N_VERSION_NOTIFICATIONS_ENABLED:-true}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./local-files:/files
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e "fetch('http://127.0.0.1:5678/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "${LOG_MAX_SIZE:-10m}"
+        max-file: "${LOG_MAX_FILES:-3}"
+    networks:
+      - n8n_internal
+
+  n8n-worker-1:
+    image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG:-1.121.0}
+    restart: unless-stopped
+    command: worker --concurrency=${N8N_WORKER_CONCURRENCY:-5}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cpus: ${N8N_WORKER_CPUS:-2.0}
+    mem_limit: ${N8N_WORKER_MEMORY:-6g}
+    stop_grace_period: 90s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-change-me-generate-a-32-plus-character-key}
       N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
       N8N_RUNNERS_ENABLED: "true"
@@ -104,17 +199,27 @@ services:
       DB_POSTGRESDB_USER: ${POSTGRES_USER:-n8n}
       DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:-change-me-generate-a-long-password}
       DB_POSTGRESDB_SCHEMA: public
-      EXECUTIONS_DATA_PRUNE: ${EXECUTIONS_DATA_PRUNE:-true}
-      EXECUTIONS_DATA_MAX_AGE: ${EXECUTIONS_DATA_MAX_AGE:-336}
-      N8N_DIAGNOSTICS_ENABLED: ${N8N_DIAGNOSTICS_ENABLED:-false}
-      N8N_VERSION_NOTIFICATIONS_ENABLED: ${N8N_VERSION_NOTIFICATIONS_ENABLED:-true}
+      EXECUTIONS_MODE: queue
+      N8N_DEFAULT_BINARY_DATA_MODE: ${N8N_DEFAULT_BINARY_DATA_MODE:-database}
+      N8N_EVENTBUS_LOGWRITER_LOGFULLPATH: /home/node/.n8n/n8nEventLog-worker-1.log
+      N8N_EVENTBUS_LOGWRITER_MAXTOTALMESSAGESPERFILE: ${N8N_EVENTBUS_LOGWRITER_MAXTOTALMESSAGESPERFILE:-500000}
+      N8N_CONCURRENCY_PRODUCTION_LIMIT: ${N8N_CONCURRENCY_PRODUCTION_LIMIT:-20}
+      QUEUE_BULL_REDIS_HOST: redis
+      QUEUE_BULL_REDIS_PORT: 6379
+      QUEUE_BULL_REDIS_PASSWORD: ${REDIS_PASSWORD:-change-me-generate-a-long-redis-password}
+      QUEUE_BULL_REDIS_DB: ${QUEUE_BULL_REDIS_DB:-0}
+      QUEUE_BULL_REDIS_TIMEOUT_THRESHOLD: ${QUEUE_BULL_REDIS_TIMEOUT_THRESHOLD:-10000}
+      QUEUE_HEALTH_CHECK_ACTIVE: "true"
+      N8N_GRACEFUL_SHUTDOWN_TIMEOUT: ${N8N_GRACEFUL_SHUTDOWN_TIMEOUT:-60}
     volumes:
       - n8n_data:/home/node/.n8n
       - ./local-files:/files
     tmpfs:
       - /tmp:size=256m,mode=1777
     healthcheck:
-      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:5678/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      test:
+        - CMD-SHELL
+        - node -e "fetch('http://127.0.0.1:5678/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
       interval: 30s
       timeout: 10s
       retries: 5
@@ -127,21 +232,116 @@ services:
     networks:
       - n8n_internal
 
-  task-runners:
+  n8n-worker-2:
+    image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG:-1.121.0}
+    restart: unless-stopped
+    command: worker --concurrency=${N8N_WORKER_CONCURRENCY:-5}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cpus: ${N8N_WORKER_CPUS:-2.0}
+    mem_limit: ${N8N_WORKER_MEMORY:-6g}
+    stop_grace_period: 90s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-change-me-generate-a-32-plus-character-key}
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      N8N_RUNNERS_ENABLED: "true"
+      N8N_RUNNERS_MODE: external
+      N8N_RUNNERS_BROKER_LISTEN_ADDRESS: 0.0.0.0
+      N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN:-change-me-generate-a-long-runner-token}
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-Asia/Yangon}
+      TZ: ${TZ:-Asia/Yangon}
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB:-n8n}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER:-n8n}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:-change-me-generate-a-long-password}
+      DB_POSTGRESDB_SCHEMA: public
+      EXECUTIONS_MODE: queue
+      N8N_DEFAULT_BINARY_DATA_MODE: ${N8N_DEFAULT_BINARY_DATA_MODE:-database}
+      N8N_EVENTBUS_LOGWRITER_LOGFULLPATH: /home/node/.n8n/n8nEventLog-worker-2.log
+      N8N_EVENTBUS_LOGWRITER_MAXTOTALMESSAGESPERFILE: ${N8N_EVENTBUS_LOGWRITER_MAXTOTALMESSAGESPERFILE:-500000}
+      N8N_CONCURRENCY_PRODUCTION_LIMIT: ${N8N_CONCURRENCY_PRODUCTION_LIMIT:-20}
+      QUEUE_BULL_REDIS_HOST: redis
+      QUEUE_BULL_REDIS_PORT: 6379
+      QUEUE_BULL_REDIS_PASSWORD: ${REDIS_PASSWORD:-change-me-generate-a-long-redis-password}
+      QUEUE_BULL_REDIS_DB: ${QUEUE_BULL_REDIS_DB:-0}
+      QUEUE_BULL_REDIS_TIMEOUT_THRESHOLD: ${QUEUE_BULL_REDIS_TIMEOUT_THRESHOLD:-10000}
+      QUEUE_HEALTH_CHECK_ACTIVE: "true"
+      N8N_GRACEFUL_SHUTDOWN_TIMEOUT: ${N8N_GRACEFUL_SHUTDOWN_TIMEOUT:-60}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./local-files:/files
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e "fetch('http://127.0.0.1:5678/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "${LOG_MAX_SIZE:-10m}"
+        max-file: "${LOG_MAX_FILES:-3}"
+    networks:
+      - n8n_internal
+
+  task-runner-worker-1:
     image: n8nio/runners:${N8N_IMAGE_TAG:-1.121.0}
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    cpus: ${N8N_RUNNERS_CPUS:-1.0}
-    mem_limit: ${N8N_RUNNERS_MEMORY:-1024m}
+    cpus: ${N8N_RUNNERS_CPUS:-0.5}
+    mem_limit: ${N8N_RUNNERS_MEMORY:-1g}
     stop_grace_period: 60s
     depends_on:
-      n8n:
+      n8n-worker-1:
         condition: service_healthy
     environment:
-      N8N_RUNNERS_TASK_BROKER_URI: http://n8n:5679
+      N8N_RUNNERS_TASK_BROKER_URI: http://n8n-worker-1:5679
+      N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN:-change-me-generate-a-long-runner-token}
+      N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT: ${N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT:-15}
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-Asia/Yangon}
+      TZ: ${TZ:-Asia/Yangon}
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    logging:
+      driver: json-file
+      options:
+        max-size: "${LOG_MAX_SIZE:-10m}"
+        max-file: "${LOG_MAX_FILES:-3}"
+    networks:
+      - n8n_internal
+
+  task-runner-worker-2:
+    image: n8nio/runners:${N8N_IMAGE_TAG:-1.121.0}
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cpus: ${N8N_RUNNERS_CPUS:-0.5}
+    mem_limit: ${N8N_RUNNERS_MEMORY:-1g}
+    stop_grace_period: 60s
+    depends_on:
+      n8n-worker-2:
+        condition: service_healthy
+    environment:
+      N8N_RUNNERS_TASK_BROKER_URI: http://n8n-worker-2:5679
       N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN:-change-me-generate-a-long-runner-token}
       N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT: ${N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT:-15}
       GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-Asia/Yangon}
@@ -165,3 +365,5 @@ volumes:
     name: ${COMPOSE_PROJECT_NAME:-n8n}_n8n_data
   postgres_data:
     name: ${COMPOSE_PROJECT_NAME:-n8n}_postgres_data
+  redis_data:
+    name: ${COMPOSE_PROJECT_NAME:-n8n}_redis_data

@@ -1,6 +1,6 @@
 # Production n8n Docker Setup
 
-This setup runs n8n with PostgreSQL, persistent Docker volumes, local file storage, external task runners, health checks, and backup/restore scripts for a small single-server production install.
+This setup runs n8n in queue mode with PostgreSQL, Redis, two n8n workers, one external task-runner sidecar per worker, persistent Docker volumes, local file storage, health checks, and backup/restore scripts for a single-server SOC/SOAR production install.
 
 ## Quick start
 
@@ -55,13 +55,15 @@ Default minimum host checks:
 - `MIN_FREE_DISK_MB=10240`
 - `MIN_BACKUP_FREE_DISK_MB=20480`
 
-Default container caps:
+Default queue-mode container caps for an 8 CPU / 32 GB server:
 
-- PostgreSQL: `POSTGRES_CPUS=1.0`, `POSTGRES_MEMORY=768m`
-- n8n: `N8N_CPUS=1.0`, `N8N_MEMORY=1024m`
-- Task runners: `N8N_RUNNERS_CPUS=1.0`, `N8N_RUNNERS_MEMORY=1024m`
+- PostgreSQL: `POSTGRES_CPUS=1.5`, `POSTGRES_MEMORY=8g`
+- Redis: `REDIS_CPUS=0.5`, `REDIS_MEMORY=2g`
+- n8n main: `N8N_MAIN_CPUS=1.5`, `N8N_MAIN_MEMORY=4g`
+- n8n workers: `N8N_WORKER_CPUS=2.0`, `N8N_WORKER_MEMORY=6g` each
+- Task-runner sidecars: `N8N_RUNNERS_CPUS=0.5`, `N8N_RUNNERS_MEMORY=1g` each
 
-For a 2 CPU / 2 GB RAM server, keep workflow concurrency low and avoid large binary payload processing. For heavier workflows, file processing, AI calls, or many concurrent executions, increase RAM first and then raise `N8N_MEMORY` and `N8N_RUNNERS_MEMORY`.
+This leaves RAM for the OS, filesystem cache, reverse proxy, monitoring, and security agents. For heavier workflows, increase worker memory first, then worker count/concurrency.
 
 Run preflight checks manually:
 
@@ -79,11 +81,30 @@ PostgreSQL memory knobs are exposed in `.env`:
 
 Docker JSON logs are capped with `LOG_MAX_SIZE` and `LOG_MAX_FILES` to avoid log growth filling the disk.
 
-Runtime containers set `no-new-privileges` to reduce container breakout blast radius. n8n and task runners also drop Linux capabilities and get a bounded `/tmp` tmpfs for temporary writes. PostgreSQL keeps its default capabilities because the official image may need startup permissions while initializing or fixing ownership on the data volume. If you want to go stricter, test a Compose override with `read_only: true` for n8n and task runners after confirming all nodes you use can write only to `/tmp`, `/home/node/.n8n`, and `/files`.
+Runtime containers set `no-new-privileges` to reduce container breakout blast radius. n8n main, n8n workers, and task-runner sidecars also drop Linux capabilities and get a bounded `/tmp` tmpfs for temporary writes. PostgreSQL keeps its default capabilities because the official image may need startup permissions while initializing or fixing ownership on the data volume. If you want to go stricter, test a Compose override with `read_only: true` for n8n services after confirming all nodes you use can write only to `/tmp`, `/home/node/.n8n`, and `/files`.
+
+## Queue Mode
+
+This deployment uses n8n queue mode for SOC/SOAR workloads that ingest alert bursts, enrich concurrently, call Elastic, and create notifications or tickets. The main `n8n` service handles the UI, API, schedules, and webhook intake. Redis stores pending execution jobs. `n8n-worker-1` and `n8n-worker-2` process workflow executions. `task-runner-worker-1` and `task-runner-worker-2` connect to their matching worker broker for external code/task execution isolation.
+
+Important queue-mode settings in `.env`:
+
+```bash
+EXECUTIONS_MODE=queue
+OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS=true
+N8N_WORKER_CONCURRENCY=5
+N8N_CONCURRENCY_PRODUCTION_LIMIT=20
+QUEUE_BULL_REDIS_DB=0
+QUEUE_HEALTH_CHECK_ACTIVE=true
+```
+
+Increase `N8N_WORKER_CONCURRENCY` cautiously. More concurrency can improve throughput, but it also increases concurrent Elastic/API calls and database load. For SOC workflows, prefer explicit retry/backoff and deduplication in workflows before raising concurrency aggressively.
+
+This setup sets `N8N_DEFAULT_BINARY_DATA_MODE=database` for queue-mode compatibility and gives the main process and each worker a unique `N8N_EVENTBUS_LOGWRITER_LOGFULLPATH` because they share the n8n data volume. Do not switch to filesystem binary-data mode with queue mode. For very large binary workloads, move binary data to external object storage such as S3.
 
 ## Automatic updates
 
-The update script pulls the configured n8n and task-runner images, compares them with the running containers, creates a backup, recreates the n8n and task-runner containers, and waits for n8n to become healthy.
+The update script pulls the configured n8n and task-runner images, compares them with the running containers, creates a backup, recreates the n8n main, workers, and task-runner sidecars, then waits for all n8n processes to become healthy.
 
 Check for an available update without restarting n8n:
 
@@ -131,14 +152,14 @@ The update script will not restart n8n when:
 
 - You run `scripts/update-n8n.sh --check`.
 - No newer image is available.
-- n8n is unhealthy before a normal update.
+- n8n main or any worker is unhealthy before a normal update.
 - Host CPU, RAM, or disk preflight checks fail.
 - `N8N_AUTO_UPDATE=false` and you did not pass `--force` or `--security`.
 
 The update script will automatically roll back to the pre-update n8n and task-runner images when:
 
-- n8n does not become healthy again.
-- The task-runner container does not stay running.
+- n8n main or any worker does not become healthy again.
+- A task-runner sidecar does not stay running.
 - Recent n8n or task-runner logs include common crash indicators such as fatal errors, failed migrations, database errors, out-of-memory errors, or permission/authentication failures.
 
 Rollback uses Docker tags created from the exact image IDs running before the update. Disable it only when you intentionally want to inspect the failed updated containers:
@@ -177,6 +198,8 @@ Backups are stored under `backups/YYYYMMDDTHHMMSSZ/` and include:
 - `local_files.tar.gz`
 - `env.snapshot`
 
+Redis queue state is not backed up. During restore, the Redis volume is cleared so stale queued jobs are not replayed against restored database state.
+
 Backup directories are created with owner-only permissions because `env.snapshot` contains secrets. Store encrypted backup copies outside this server as part of your production operations.
 
 Local backup retention defaults to 14 days:
@@ -197,7 +220,7 @@ When `RCLONE_REMOTE` is set, `scripts/backup.sh` uploads each completed backup d
 
 ## Restore
 
-Test restore before enabling unattended updates. Restore replaces `.env`, the PostgreSQL volume, the n8n data volume, and `local-files` from the selected backup:
+Test restore before enabling unattended updates. Restore replaces `.env`, the PostgreSQL volume, the n8n data volume, clears the Redis queue volume, and restores `local-files` from the selected backup:
 
 ```bash
 scripts/restore.sh backups/YYYYMMDDTHHMMSSZ
@@ -232,7 +255,7 @@ Run the monitoring check manually:
 scripts/monitor.sh
 ```
 
-It exits non-zero when n8n `/healthz` fails, free disk is below `MONITOR_MIN_FREE_DISK_MB`, the newest backup is older than `MONITOR_BACKUP_MAX_AGE_HOURS`, `backups/update.log` is stale or contains recent failure indicators, or any container has restarted.
+It exits non-zero when n8n main/worker health checks fail, free disk is below `MONITOR_MIN_FREE_DISK_MB`, the newest backup is older than `MONITOR_BACKUP_MAX_AGE_HOURS`, `backups/update.log` is stale or contains recent failure indicators, Redis is missing, a task-runner sidecar is missing, or any container has restarted.
 
 For external monitoring, run it from cron and alert on non-zero exit, or call it from a local agent used by Uptime Kuma, Cronitor, healthchecks.io, or your host monitoring stack.
 
@@ -251,7 +274,8 @@ GitHub Actions validates shell syntax, runs ShellCheck, and checks Docker Compos
 ## Notes
 
 - This setup pins `N8N_IMAGE_TAG` because external task runners require a matching versioned `n8nio/runners` image; `n8nio/runners:stable` is not published.
-- External task runners use the same `N8N_IMAGE_TAG` as n8n, as required by n8n's task-runner guidance.
+- External task-runner sidecars use the same `N8N_IMAGE_TAG` as n8n, as required by n8n's task-runner guidance. Each worker has its own sidecar.
 - PostgreSQL data is stored in the `${COMPOSE_PROJECT_NAME}_postgres_data` Docker volume.
 - n8n application data is stored in the `${COMPOSE_PROJECT_NAME}_n8n_data` Docker volume.
+- Redis queue data is stored in the `${COMPOSE_PROJECT_NAME}_redis_data` Docker volume.
 - Files mounted at `/files` inside n8n are stored in `./local-files`.

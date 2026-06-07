@@ -67,7 +67,7 @@ else
   fail "missing backups/update.log; install the update cron or run scripts/update-n8n.sh"
 fi
 
-for service in n8n task-runners postgres; do
+for service in n8n n8n-worker-1 n8n-worker-2 task-runner-worker-1 task-runner-worker-2 postgres redis; do
   container_id="$(docker compose ps -q "${service}" 2>/dev/null || true)"
   if [[ -z "${container_id}" ]]; then
     fail "${service} container is missing"

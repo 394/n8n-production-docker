@@ -22,11 +22,13 @@ if [[ ! -f "${ENV_FILE}" ]]; then
   postgres_password="$(openssl rand -base64 36 | tr -d '\n' || true)"
   encryption_key="$(openssl rand -hex 32 | tr -d '\n' || true)"
   runners_auth_token="$(openssl rand -base64 36 | tr -d '\n' || true)"
+  redis_password="$(openssl rand -base64 36 | tr -d '\n' || true)"
 
-  if [[ -n "${postgres_password}" && -n "${encryption_key}" && -n "${runners_auth_token}" ]]; then
+  if [[ -n "${postgres_password}" && -n "${encryption_key}" && -n "${runners_auth_token}" && -n "${redis_password}" ]]; then
     sed -i "s|POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=${postgres_password}|" .env
     sed -i "s|N8N_ENCRYPTION_KEY=.*|N8N_ENCRYPTION_KEY=${encryption_key}|" .env
     sed -i "s|N8N_RUNNERS_AUTH_TOKEN=.*|N8N_RUNNERS_AUTH_TOKEN=${runners_auth_token}|" .env
+    sed -i "s|REDIS_PASSWORD=.*|REDIS_PASSWORD=${redis_password}|" .env
   else
     echo "Created .env, but could not generate secrets. Edit .env before starting." >&2
   fi
