@@ -55,7 +55,7 @@ Default minimum host checks:
 - `MIN_FREE_DISK_MB=10240`
 - `MIN_BACKUP_FREE_DISK_MB=20480`
 
-Default queue-mode container caps for an 8 CPU / 32 GB server:
+Default queue-mode container caps are a scalable baseline; tune them in `.env` for your test or production host:
 
 - PostgreSQL: `POSTGRES_CPUS=1.5`, `POSTGRES_MEMORY=8g`
 - Redis: `REDIS_CPUS=0.5`, `REDIS_MEMORY=2g`
@@ -63,7 +63,7 @@ Default queue-mode container caps for an 8 CPU / 32 GB server:
 - n8n workers: `N8N_WORKER_CPUS=2.0`, `N8N_WORKER_MEMORY=6g` each
 - Task-runner sidecars: `N8N_RUNNERS_CPUS=0.5`, `N8N_RUNNERS_MEMORY=1g` each
 
-This leaves RAM for the OS, filesystem cache, reverse proxy, monitoring, and security agents. For heavier workflows, increase worker memory first, then worker count/concurrency.
+Keep enough RAM for the OS, filesystem cache, reverse proxy, monitoring, and security agents. For smaller test hosts, reduce worker memory and concurrency. For heavier production workflows, increase worker memory first, then worker count/concurrency.
 
 Run preflight checks manually:
 
